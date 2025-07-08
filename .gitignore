@@ -1,0 +1,9 @@
+
+# ignore data, caches, IDE & envs
+data/
+src/cache/
+src/feature_engineering/cache/
+src/data_manipulation/cache/
+.idea/
+venv/
+.venv/
