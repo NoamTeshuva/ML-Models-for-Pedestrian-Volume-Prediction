@@ -1,4 +1,4 @@
-# file: src/featuers_engenniring/time_features_aus.py
+# file: src/feature_engineering/time_features_aus.py
 
 import pandas as pd
 from pathlib import Path
