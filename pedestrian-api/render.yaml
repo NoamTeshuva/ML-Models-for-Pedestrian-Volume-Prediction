@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: pedestrian-api
+    env: docker          # or python if you prefer the buildpack
+    branch: main
+    rootDir: pedestrian-api
+    dockerfilePath: pedestrian-api/Dockerfile   # only if env: docker
+    plan: free
+    healthCheckPath: /ping
