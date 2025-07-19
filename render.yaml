@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: pedestrian-api
+    env: docker
+    plan: free            # or starter, etc.
+    branch: main
+    rootDir: pedestrian-api       # <‑‑ tells Render to cd here before build
+    dockerfilePath: pedestrian-api/Dockerfile  # <‑‑ exact Dockerfile location
