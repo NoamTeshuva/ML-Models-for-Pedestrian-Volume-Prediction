@@ -1,118 +1,130 @@
+#!/usr/bin/env python3
+# pedestrian-api/app.py
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import osmnx as ox
-import geopandas as gpd
-import networkx as nx
 import pandas as pd
-from catboost import CatBoostClassifier
+from catboost import CatBoostClassifier, Pool
+import traceback
 
-# Initialize Flask
+# Import your feature‑engineering functions from the local folder
+from feature_engineering.centrality_features import compute_centrality
+from feature_engineering.time_features       import compute_time_features
+from feature_engineering.landuse_features import compute_landuse_edges
+from feature_engineering.highway_features    import compute_highway
+
 app = Flask(__name__)
 CORS(app)
 
-# Load the CatBoost model (make sure cb_model.cbm is in the same folder)
+# Load the pre‑trained CatBoost model (cb_model.cbm must be present)
 model = CatBoostClassifier()
 model.load_model("cb_model.cbm")
 
-# Define which features and categorical columns the model expects
+# The features your model expects, in order
 FEATS = [
-    "length",        # edge length (meters)
-    "betweenness",   # betweenness centrality
-    "closeness",     # closeness centrality
-    "Hour",          # hour of day
-    "is_weekend",    # boolean weekend flag
-    "time_of_day",   # categorical: morning/afternoon/evening/night
-    "land_use",      # categorical land use class
-    "highway"        # categorical highway type
+    "length",
+    "betweenness",
+    "closeness",
+    "Hour",
+    "is_weekend",
+    "time_of_day",
+    "land_use",
+    "highway",
 ]
 CAT_COLS = ["time_of_day", "land_use", "highway"]
 
 
 def extract_features(G, dt_index):
-    """
-    Given an OSMnx graph G and a datetime pandas.Index dt_index for features,
-    compute a GeoDataFrame of edges with all required features.
+    # 1) Base GeoDataFrame
+    gdf = ox.graph_to_gdfs(G, nodes=False).reset_index()
+    print("🔹 BASE edges:", len(gdf))
 
-    dt_index should contain a single pandas.Timestamp representing now, or
-    a series of datetimes to apply temporal features.
-    """
-    # Convert to GeoDataFrame of edges
-    gdf = ox.graph_to_gdfs(G, nodes=False)
+    # 2) Centrality
+    gdf = compute_centrality(G, gdf)
+    print("🔹 After centrality:", gdf.shape)
 
-    # 1) Length is already present
-    gdf["length"] = gdf["length"].fillna(0)
-
-    # 2) Centrality measures (approximate if G is large)
-    # Using networkx approximation with k = min(500, n_nodes)
-    n = len(G.nodes)
-    k = min(500, n)
-    between = nx.betweenness_centrality(G, k=k, normalized=True)
-    close = nx.closeness_centrality(G)
-    # Map centralities to edges via u->v
-    gdf["betweenness"] = gdf["u"].map(between)
-    gdf["closeness"]   = gdf["u"].map(close)
-
-    # 3) Temporal features (using dt_index[0])
+    # 3) Temporal
     ts = pd.to_datetime(dt_index[0])
-    gdf["Hour"] = ts.hour
-    gdf["is_weekend"] = int(ts.weekday() >= 5)
-    # Derive time_of_day category
-    h = ts.hour
-    if 5 <= h < 12:
-        tod = "morning"
-    elif 12 <= h < 17:
-        tod = "afternoon"
-    elif 17 <= h < 21:
-        tod = "evening"
-    else:
-        tod = "night"
-    gdf["time_of_day"] = tod
+    gdf = compute_time_features(gdf, ts)
+    print("🔹 After time feats:", gdf.shape)
 
-    # 4) Categorical OSM tags
-    gdf["land_use"] = gdf["landuse"].fillna("other").astype(str)
-    gdf["highway"]  = gdf["highway"].fillna("unknown").astype(str)
+    # 4) Land‑use
+    gdf = compute_landuse_edges(gdf)
+    print("🔹 After landuse:", gdf.shape)
 
-    # Keep only required columns
+    # 5) Highway
+    gdf = compute_highway(gdf)
+    print("🔹 After highway:", gdf.shape)
+
+    # 6) Final feature set
     feats = gdf[FEATS].copy()
-
-    # Cast categorical columns
-    for c in CAT_COLS:
-        feats[c] = feats[c].astype("category")
-
+    print("🔹 Final feature df:", feats.shape)
     return gdf, feats
+
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    """Health check endpoint."""
+    return jsonify({"pong": True})
 
 
 @app.route("/predict", methods=["GET"])
 def predict():
+    """Predict pedestrian-volume bins (1–5) for the given place and date."""
+    print(f"🚀 Received request with args: {request.args}")
     place = request.args.get("place")
-    date  = request.args.get("date")  # optional ISO string
+    date  = request.args.get("date")
 
     if not place:
         return jsonify({"error": "Missing 'place' parameter"}), 400
 
     try:
-        # Load walkable graph from OSM
+        # 1) Download walkable graph
         G = ox.graph_from_place(place, network_type="walk")
 
-        # Build a datetime index
+        # 2) Build datetime index
         if date:
             dt_idx = pd.to_datetime([date])
         else:
             dt_idx = pd.to_datetime([pd.Timestamp.now()])
 
-        # Extract features and original geometry frame
+        # 3) Extract features
         gdf_edges, feats = extract_features(G, dt_idx)
 
-        # Predict volume bins
-        preds = model.predict(feats)
+        # 4) Predict and attach
+        # Validate that all required features are present
+        missing_features = [feat for feat in FEATS if feat not in feats.columns]
+        if missing_features:
+            raise ValueError(f"Missing required features: {missing_features}")
+        
+        # Get indices of categorical features for CatBoost
+        cat_feature_indices = [feats.columns.get_loc(col) for col in CAT_COLS if col in feats.columns]
+        print(f"🔹 Categorical features: {CAT_COLS}")
+        print(f"🔹 Categorical indices: {cat_feature_indices}")
+        print(f"🔹 Feature columns: {list(feats.columns)}")
+        print(f"🔹 Feature dtypes: {feats.dtypes.to_dict()}")
+        
+        # Ensure categorical features are strings
+        for col in CAT_COLS:
+            if col in feats.columns:
+                feats[col] = feats[col].astype(str)
+        
+        # Create CatBoost Pool with categorical features
+        pool = Pool(feats, cat_features=cat_feature_indices)
+        
+        # Make prediction using the pool
+        preds = model.predict(pool)
         gdf_edges["volume_bin"] = preds.astype(int)
 
-        # Return GeoJSON of edges with volume_bin
+        # 5) Return GeoJSON
         return gdf_edges.to_json()
 
     except Exception as e:
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
+    # Development server; use Gunicorn in production
     app.run(host="0.0.0.0", port=5000, debug=True)
