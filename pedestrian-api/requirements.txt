@@ -7,3 +7,4 @@ geopandas
 osmnx
 shapely
 gunicorn>=20.1.0
+fiona>=1.9.4
