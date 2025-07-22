@@ -6,3 +6,4 @@ numpy
 geopandas
 osmnx
 shapely
+gunicorn>=20.1.0
