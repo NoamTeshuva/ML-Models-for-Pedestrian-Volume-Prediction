@@ -18,4 +18,5 @@ COPY . .
 EXPOSE 5000
 
 # Define default command to launch API via Gunicorn with 2 workers
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"] 
+# raise worker timeout to 120s and use a single worker to reduce memory pressure
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "120", "app:app"] 
