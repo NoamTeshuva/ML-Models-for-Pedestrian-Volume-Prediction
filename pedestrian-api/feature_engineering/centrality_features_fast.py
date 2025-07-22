@@ -26,8 +26,15 @@ def compute_centrality_fast(G, edges_gdf, k=500):
     for u in sample:
         c = nx.closeness_centrality(G, u, distance="length")
         for v in edges_gdf["osmid"]:
-            # map each edge’s osmid to its centrality; fallback to 0
-            closeness[v] = closeness.get(v, 0) + c
+            # Ensure v is hashable (int or str), not a list
+            if isinstance(v, list):
+                if v:  # non-empty
+                    v_key = v[0]
+                else:
+                    continue
+            else:
+                v_key = v
+            closeness[v_key] = closeness.get(v_key, 0) + c
     # normalize closeness by number of samples
     for v in closeness:
         closeness[v] /= len(sample)

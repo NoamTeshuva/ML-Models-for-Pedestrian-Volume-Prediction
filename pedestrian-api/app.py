@@ -75,13 +75,19 @@ def predict():
     print(f"🚀 Received request with args: {request.args}")
     place = request.args.get("place")
     date  = request.args.get("date")
+    bbox_str = request.args.get("bbox", None)
 
     if not place:
         return jsonify({"error": "Missing 'place' parameter"}), 400
 
     try:
         # 1) Download walkable graph
-        G = ox.graph_from_place(place, network_type="walk")
+        if bbox_str:
+            # parse minx,miny,maxx,maxy
+            minx, miny, maxx, maxy = map(float, bbox_str.split(","))
+            G = ox.graph_from_bbox((minx, miny, maxx, maxy), network_type="walk")
+        else:
+            G = ox.graph_from_place(place, network_type="walk")
 
         # 2) Build datetime index
         if date:

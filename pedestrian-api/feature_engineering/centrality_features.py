@@ -60,13 +60,16 @@ def compute_centrality(G, gdf, sample_size: int = None):
     n = len(G.nodes)
     k = sample_size if sample_size is not None else min(500, n)
 
-    between, close = compute_centrality_fast(G, gdf, k=k)
+    # Compute betweenness centrality for nodes
+    betweenness = nx.betweenness_centrality(G, k=k if k < n else None, normalized=True, weight="length")
+    # Compute closeness centrality for nodes
+    closeness = nx.closeness_centrality(G, distance="length")
 
     if 'u' not in gdf.columns:
         raise KeyError("GeoDataFrame must contain column 'u' for source node IDs.")
 
-    gdf['betweenness'] = gdf['u'].map(between).fillna(0)
-    gdf['closeness']   = gdf['u'].map(close).fillna(0)
+    gdf['betweenness'] = gdf['u'].map(betweenness).fillna(0)
+    gdf['closeness']   = gdf['u'].map(closeness).fillna(0)
     return gdf
 
 
@@ -113,7 +116,7 @@ def main():
         sys.exit("❌ 'nodes' must have 'index' or 'osmid'")
 
     edges_gdf = edges_gdf.set_index(["u","v","key"])
-    G = ox.graph_from_gdfs(nodes_gdf, edges_gdf)
+    G = ox.graph_from_bbox((minx, miny, maxx, maxy), network_type="walk")
     G = ox.project_graph(G, to_crs="EPSG:3857")
     print("✅ Graph projected to EPSG:3857")
 
