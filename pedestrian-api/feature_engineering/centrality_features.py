@@ -15,6 +15,7 @@ import fiona
 import osmnx as ox
 import networkx as nx
 from osmnx.truncate import truncate_graph_polygon
+from .centrality_features_fast import compute_centrality_fast
 
 
 def normalize_osm(x):
@@ -59,8 +60,7 @@ def compute_centrality(G, gdf, sample_size: int = None):
     n = len(G.nodes)
     k = sample_size if sample_size is not None else min(500, n)
 
-    between = nx.betweenness_centrality(G, k=k, normalized=True)
-    close   = nx.closeness_centrality(G)
+    between, close = compute_centrality_fast(G, gdf, k=k)
 
     if 'u' not in gdf.columns:
         raise KeyError("GeoDataFrame must contain column 'u' for source node IDs.")
