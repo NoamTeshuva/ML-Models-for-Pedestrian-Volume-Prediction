@@ -105,7 +105,7 @@ def extract_street_network(place: Optional[str] = None,
     
     Args:
         place: Place name (e.g., "Monaco", "Tel Aviv")
-        bbox: Bounding box as (minx, miny, maxx, maxy) in EPSG:4326
+        bbox: Bounding box as (west, south, east, north) in EPSG:4326
         
     Returns:
         tuple: (NetworkX graph, edges GeoDataFrame)
@@ -120,9 +120,10 @@ def extract_street_network(place: Optional[str] = None,
         if place:
             G = ox.graph_from_place(place, network_type=PipelineConfig.NETWORK_TYPE)
         else:
-            # OSMnx expects positional arguments: north, south, east, west
+            # OSMnx 2.0+ expects bbox as (west, south, east, north) tuple
+            bbox_osmnx = (bbox[0], bbox[1], bbox[2], bbox[3])  # (west, south, east, north)
             G = ox.graph_from_bbox(
-                bbox[3], bbox[1], bbox[2], bbox[0],  # north, south, east, west
+                bbox=bbox_osmnx,
                 network_type=PipelineConfig.NETWORK_TYPE
             )
         
