@@ -120,8 +120,9 @@ def extract_street_network(place: Optional[str] = None,
         if place:
             G = ox.graph_from_place(place, network_type=PipelineConfig.NETWORK_TYPE)
         else:
+            # OSMnx expects positional arguments: north, south, east, west
             G = ox.graph_from_bbox(
-                north=bbox[3], south=bbox[1], east=bbox[2], west=bbox[0],
+                bbox[3], bbox[1], bbox[2], bbox[0],  # north, south, east, west
                 network_type=PipelineConfig.NETWORK_TYPE
             )
         
