@@ -187,13 +187,13 @@ def _fetch_osm_landuse(place: Optional[str],
                     details={"place": place, "osm_error": str(e)}
                 )
             # Fallback to bbox
-            return ox.features_from_bbox(
-                north=bbox[3], south=bbox[1], east=bbox[2], west=bbox[0], tags=tags
-            )
+            # OSMnx 2.0+ expects bbox as (west, south, east, north) tuple
+            bbox_osmnx = (bbox[0], bbox[1], bbox[2], bbox[3])  # (west, south, east, north)
+            return ox.features_from_bbox(bbox=bbox_osmnx, tags=tags)
     else:
-        return ox.features_from_bbox(
-            north=bbox[3], south=bbox[1], east=bbox[2], west=bbox[0], tags=tags
-        )
+        # OSMnx 2.0+ expects bbox as (west, south, east, north) tuple  
+        bbox_osmnx = (bbox[0], bbox[1], bbox[2], bbox[3])  # (west, south, east, north)
+        return ox.features_from_bbox(bbox=bbox_osmnx, tags=tags)
 
 
 def _process_landuse_data(landuse: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
