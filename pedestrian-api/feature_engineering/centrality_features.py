@@ -2,154 +2,319 @@
 """
 centrality_features.py
 
-This module serves two purposes:
- 1) Provides compute_centrality(G, gdf) for on‑the‑fly use in the Flask API.
- 2) Retains the original main() CLI workflow for batch processing and file I/O.
+Modular centrality feature extraction for street networks.
+Computes betweenness and closeness centrality with performance optimizations and validation.
+Follows CLAUDE.md guidelines for production-ready, type-safe code.
 """
 import sys
 import ast
+import logging
 from pathlib import Path
+from typing import Optional, Dict, Any, List, Union
 import pandas as pd
 import geopandas as gpd
-import fiona
-import osmnx as ox
 import networkx as nx
-from osmnx.truncate import truncate_graph_polygon
-from .centrality_features_fast import compute_centrality_fast
+import osmnx as ox
+
+# Configuration
+class CentralityConfig:
+    """Configuration constants for centrality computation."""
+    DEFAULT_SAMPLE_SIZE = 500
+    CRS_METRIC = 3857  # EPSG:3857 for accurate distance calculations
+    MIN_NODES_FOR_SAMPLING = 50
+    CENTRALITY_COLUMNS = ['betweenness', 'closeness']
+    
+    @staticmethod
+    def get_optimal_sample_size(n_nodes: int, requested_size: Optional[int] = None) -> Optional[int]:
+        """Determine optimal sample size for centrality computation.
+        
+        Args:
+            n_nodes: Total number of nodes in graph
+            requested_size: User-requested sample size
+            
+        Returns:
+            int or None: Optimal sample size, None for exact computation
+        """
+        if n_nodes < CentralityConfig.MIN_NODES_FOR_SAMPLING:
+            return None  # Use exact computation for small graphs
+        
+        if requested_size is not None:
+            return min(requested_size, n_nodes)
+        
+        return min(CentralityConfig.DEFAULT_SAMPLE_SIZE, n_nodes)
 
 
-def normalize_osm(x):
-    """Normalize an OSMID field into a list of ints."""
-    if isinstance(x, list):
-        return [int(i) for i in x]
-    if isinstance(x, str):
-        s = x.strip()
-        if s.startswith("[") and s.endswith("]"):
-            try:
-                return [int(i) for i in ast.literal_eval(s)]
-            except Exception:
-                return [int(i.strip()) for i in s[1:-1].split(",") if i.strip().isdigit()]
-        elif s.isdigit():
-            return [int(s)]
+class CentralityError(Exception):
+    """Exception for centrality computation errors."""
+    def __init__(self, message: str, code: int = 400, details: Optional[Dict[str, Any]] = None):
+        self.message = message
+        self.code = code
+        self.details = details or {}
+        super().__init__(self.message)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert error to dictionary for JSON responses."""
+        return {
+            "error": self.message,
+            "code": self.code,
+            "details": self.details
+        }
+
+
+def normalize_osm_id(osmid_value: Union[int, str, List[int], List[str]]) -> List[int]:
+    """Normalize an OSMID field into a list of integers with comprehensive validation.
+    
+    Args:
+        osmid_value: Raw OSMID value in various formats
+        
+    Returns:
+        List[int]: Normalized list of OSMID integers
+        
+    Raises:
+        CentralityError: If OSMID cannot be normalized
+    """
     try:
-        return [int(x)]
-    except Exception:
+        if isinstance(osmid_value, list):
+            return [int(i) for i in osmid_value if i is not None]
+        
+        if isinstance(osmid_value, str):
+            s = osmid_value.strip()
+            if not s:
+                return []
+                
+            # Handle string representation of lists: "[123, 456]"
+            if s.startswith("[") and s.endswith("]"):
+                try:
+                    parsed = ast.literal_eval(s)
+                    return [int(i) for i in parsed if i is not None]
+                except (ValueError, SyntaxError):
+                    # Fallback: manual parsing "[123, 456]"
+                    content = s[1:-1].strip()
+                    if not content:
+                        return []
+                    parts = [part.strip() for part in content.split(",")]
+                    return [int(part) for part in parts if part.isdigit()]
+            
+            # Handle single numeric string
+            elif s.isdigit():
+                return [int(s)]
+        
+        # Handle single numeric value
+        if osmid_value is not None:
+            return [int(osmid_value)]
+            
         return []
+        
+    except (ValueError, TypeError) as e:
+        raise CentralityError(
+            f"Cannot normalize OSMID value: {osmid_value}",
+            code=400,
+            details={"osmid_value": str(osmid_value), "error": str(e)}
+        )
 
 
-def compute_centrality(G, gdf, sample_size: int = None):
+def validate_graph_input(G: Union[nx.Graph, nx.DiGraph]) -> None:
+    """Validate graph input for centrality computation.
+    
+    Args:
+        G: NetworkX graph (directed or undirected)
+        
+    Raises:
+        CentralityError: If graph is invalid
     """
-    Compute and attach betweenness & closeness centrality to an edge GeoDataFrame.
+    if not isinstance(G, (nx.Graph, nx.DiGraph, nx.MultiGraph, nx.MultiDiGraph)):
+        raise CentralityError("Input must be a NetworkX Graph", code=400)
+    
+    if len(G.nodes) == 0:
+        raise CentralityError("Graph cannot be empty", code=400)
+    
+    # Check connectivity based on graph type
+    if isinstance(G, (nx.DiGraph, nx.MultiDiGraph)):
+        if not nx.is_weakly_connected(G):
+            logging.warning("Directed graph is not weakly connected. Using largest component.")
+    else:
+        if not nx.is_connected(G):
+            logging.warning("Graph is not connected. Using largest connected component.")
 
-    Parameters
-    ----------
-    G : networkx.Graph
-        Input graph.
-    gdf : GeoDataFrame
-        Edge GeoDataFrame; must contain column 'u' for source node.
-    sample_size : int, optional
-        Number of nodes to sample for approximate betweenness. Defaults to 500 or total nodes.
 
-    Returns
-    -------
-    GeoDataFrame
-        The same gdf with two new columns:
-          - 'betweenness'
-          - 'closeness'
+def validate_edges_input(edges_gdf: gpd.GeoDataFrame) -> None:
+    """Validate edges GeoDataFrame for centrality computation.
+    
+    Args:
+        edges_gdf: Edge GeoDataFrame
+        
+    Raises:
+        CentralityError: If edges are invalid
     """
-    n = len(G.nodes)
-    k = sample_size if sample_size is not None else min(500, n)
+    if not isinstance(edges_gdf, gpd.GeoDataFrame):
+        raise CentralityError("edges_gdf must be a GeoDataFrame", code=400)
+    
+    if edges_gdf.empty:
+        raise CentralityError("edges_gdf cannot be empty", code=400)
+    
+    if 'u' not in edges_gdf.columns:
+        raise CentralityError("edges_gdf must contain 'u' column for source node IDs", code=400)
 
-    # Compute betweenness centrality for nodes
-    betweenness = nx.betweenness_centrality(G, k=k if k < n else None, normalized=True, weight="length")
-    # Compute closeness centrality for nodes
+
+def compute_centrality(G: Union[nx.Graph, nx.DiGraph], 
+                      edges_gdf: gpd.GeoDataFrame, 
+                      sample_size: Optional[int] = None) -> gpd.GeoDataFrame:
+    """Compute and attach betweenness & closeness centrality to edge GeoDataFrame.
+    
+    This function computes node centrality measures and maps them to edges based on
+    source node IDs. Uses sampling for large graphs to maintain performance.
+    
+    Args:
+        G: NetworkX graph with 'length' edge attributes
+        edges_gdf: Edge GeoDataFrame with 'u' column for source node IDs
+        sample_size: Number of nodes for approximate betweenness. Auto-determined if None.
+        
+    Returns:
+        GeoDataFrame: Copy of edges_gdf with added 'betweenness' and 'closeness' columns
+        
+    Raises:
+        CentralityError: If inputs are invalid or computation fails
+    """
+    # Input validation
+    validate_graph_input(G)
+    validate_edges_input(edges_gdf)
+    
+    # Convert directed graph to undirected for centrality computation
+    if isinstance(G, (nx.DiGraph, nx.MultiDiGraph)):
+        G = G.to_undirected()
+        logging.info("Converted directed graph to undirected for centrality computation")
+    
+    # Handle disconnected graphs by using largest component
+    if not nx.is_connected(G):
+        G = G.subgraph(max(nx.connected_components(G), key=len)).copy()
+        logging.info(f"Using largest connected component: {len(G.nodes)} nodes")
+    
+    # Determine optimal sample size
+    n_nodes = len(G.nodes)
+    k = CentralityConfig.get_optimal_sample_size(n_nodes, sample_size)
+    
+    logging.info(f"Computing centrality for {n_nodes} nodes" + 
+                (f" (sampling {k})" if k else " (exact)"))
+    
+    try:
+        # Compute centrality measures
+        centrality_data = _compute_centrality_measures(G, k)
+        
+        # Map to edges
+        result_gdf = _map_centrality_to_edges(edges_gdf, centrality_data)
+        
+        logging.info(f"Successfully computed centrality for {len(result_gdf)} edges")
+        return result_gdf
+        
+    except Exception as e:
+        raise CentralityError(
+            f"Failed to compute centrality: {str(e)}",
+            code=500,
+            details={"n_nodes": n_nodes, "sample_size": k}
+        )
+
+
+def _compute_centrality_measures(G: nx.Graph, sample_size: Optional[int]) -> Dict[str, Dict[int, float]]:
+    """Compute betweenness and closeness centrality measures.
+    
+    Args:
+        G: NetworkX graph
+        sample_size: Sample size for betweenness computation
+        
+    Returns:
+        dict: Centrality measures by node ID
+    """
+    # Compute betweenness centrality (potentially sampled)
+    betweenness = nx.betweenness_centrality(
+        G, 
+        k=sample_size, 
+        normalized=True, 
+        weight="length"
+    )
+    
+    # Compute closeness centrality (always exact)
     closeness = nx.closeness_centrality(G, distance="length")
+    
+    return {
+        'betweenness': betweenness,
+        'closeness': closeness
+    }
 
-    if 'u' not in gdf.columns:
-        raise KeyError("GeoDataFrame must contain column 'u' for source node IDs.")
 
-    gdf['betweenness'] = gdf['u'].map(betweenness).fillna(0)
-    gdf['closeness']   = gdf['u'].map(closeness).fillna(0)
-    return gdf
+def _map_centrality_to_edges(edges_gdf: gpd.GeoDataFrame, 
+                            centrality_data: Dict[str, Dict[int, float]]) -> gpd.GeoDataFrame:
+    """Map node centrality values to edges based on source node.
+    
+    Args:
+        edges_gdf: Edge GeoDataFrame with 'u' column
+        centrality_data: Centrality measures by node ID
+        
+    Returns:
+        GeoDataFrame: Edges with centrality columns added
+    """
+    result_gdf = edges_gdf.copy()
+    
+    # Map centrality values to edges via source node 'u'
+    for measure_name, node_values in centrality_data.items():
+        result_gdf[measure_name] = result_gdf['u'].map(node_values).fillna(0.0)
+    
+    return result_gdf
+
+
+def create_error_response(message: str, code: int = 400, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create consistent error response following CLAUDE.md format.
+    
+    Args:
+        message: Error message
+        code: HTTP status code
+        details: Additional error details
+        
+    Returns:
+        dict: Structured error response
+    """
+    return {
+        "error": message,
+        "code": code,
+        "details": details
+    }
+
+
+def example_usage():
+    """Example of how to use the modular centrality functions."""
+    # Example: Create a simple test graph
+    try:
+        import networkx as nx
+        
+        # Create test graph
+        G = nx.path_graph(5)
+        nx.set_edge_attributes(G, 1.0, 'length')  # Add length attribute
+        
+        # Create test edges GeoDataFrame
+        test_edges = gpd.GeoDataFrame({
+            'u': [0, 1, 2, 3],
+            'v': [1, 2, 3, 4],
+            'geometry': [None] * 4  # Minimal example
+        })
+        
+        # Compute centrality
+        result = compute_centrality(G, test_edges)
+        print(f"Computed centrality for {len(result)} edges")
+        print(f"Centrality columns: {[col for col in result.columns if col in CentralityConfig.CENTRALITY_COLUMNS]}")
+        
+    except Exception as e:
+        print(f"Example failed: {e}")
 
 
 def main():
+    """CLI entrypoint (DEPRECATED - use API instead).
+    
+    This function is kept for backward compatibility but the dynamic API
+    approach is recommended for new implementations.
     """
-    Command-line interface for batch processing centrality on NYC data.
-    Writes:
-      - nyc_sensor_centrality.gpkg
-      - sensor_centrality.csv
-    """
-    root = Path(__file__).resolve().parents[2]
-    sensor_csv = root / "data" / "processed" / "NewYork" / "sensor_with_highway.csv"
-    gpkg_file  = root / "data" / "osm" / "newyork_street_network" / "newyork_network.gpkg"
-    out_dir    = root / "data" / "processed" / "NewYork"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    full_gpkg  = out_dir / "nyc_sensor_centrality.gpkg"
-    sensor_out = out_dir / "sensor_centrality.csv"
-    layer_name = "nyc_sensor_centrality"
-
-    # Load sensor lookup
-    df_s = pd.read_csv(sensor_csv, usecols=["sensor_name","osmid"], dtype=str)
-    df_s["osmid"] = df_s["osmid"].str.strip()
-    df_s = df_s.dropna(subset=["sensor_name","osmid"]).drop_duplicates()
-    df_s["osmid_list"] = df_s["osmid"].apply(normalize_osm)
-    df_s = df_s.explode("osmid_list").dropna(subset=["osmid_list"])
-    df_s["osmid"] = df_s["osmid_list"].astype(int)
-    all_osmids = set(df_s["osmid"])
-    print(f"✅ Loaded {len(df_s)} sensor entries ({len(all_osmids)} unique OSMIDs)")
-
-    # Load and validate network
-    layers = set(fiona.listlayers(str(gpkg_file)))
-    if not {"nodes","edges"} <= layers:
-        sys.exit(f"❌ GeoPackage must contain 'nodes' & 'edges'; got: {layers}")
-    nodes_gdf = gpd.read_file(gpkg_file, layer="nodes")
-    edges_gdf = gpd.read_file(gpkg_file, layer="edges")
-    print(f"✅ Network loaded: {len(nodes_gdf)} nodes, {len(edges_gdf)} edges")
-
-    # Build graph
-    if "index" in nodes_gdf.columns:
-        nodes_gdf = nodes_gdf.set_index("index")
-    elif "osmid" in nodes_gdf.columns:
-        nodes_gdf = nodes_gdf.set_index("osmid")
-    else:
-        sys.exit("❌ 'nodes' must have 'index' or 'osmid'")
-
-    edges_gdf = edges_gdf.set_index(["u","v","key"])
-    G = ox.graph_from_bbox((minx, miny, maxx, maxy), network_type="walk")
-    G = ox.project_graph(G, to_crs="EPSG:3857")
-    print("✅ Graph projected to EPSG:3857")
-
-    # Compute centrality
-    edges_sub = ox.graph_to_gdfs(G, nodes=False, edges=True).reset_index()
-    edges_c  = compute_centrality(G, edges_sub)
-
-    # Write outputs
-    edges_c.to_file(full_gpkg, layer=layer_name, driver="GPKG")
-    print(f"✅ GeoPackage written: {full_gpkg.name} (layer: {layer_name})")
-
-    # Sensor‐only centrality CSV
-    rows = []
-    for osmid, triples in compute_osmid_to_uvk(df_s, edges_sub).items():
-        cvals = [(edges_c.loc[(edges_c.u==u)&(edges_c.v==v), 'closeness'].iat[0]
-                 + edges_c.loc[(edges_c.u==u)&(edges_c.v==v), 'closeness'].iat[0]) / 2
-                 for (u,v,k) in triples]
-        bvals = [edges_c.loc[(edges_c.u==u)&(edges_c.v==v), 'betweenness'].iat[0]
-                 for (u,v,k) in triples]
-        rows.append({
-            'sensor_name': df_s.loc[df_s.osmid==osmid,'sensor_name'].iat[0],
-            'osmid': osmid,
-            'closeness': sum(cvals)/len(cvals),
-            'betweenness': sum(bvals)/len(bvals)
-        })
-    pd.DataFrame(rows).to_csv(sensor_out, index=False)
-    print(f"✅ CSV written: {sensor_out.name}")
-
-
-def compute_osmid_to_uvk(df_s, edges_sub):
-    # Helper to regenerate the osmid->(u,v,key) mapping for the main() CSV routine
-    mapping = df_s.groupby('osmid')[['u','v','key']].apply(lambda df: [tuple(x) for x in df.values])
-    return mapping.to_dict()
+    logging.warning("CLI main() function is deprecated. Use the dynamic API approach instead.")
+    print("This CLI function has been deprecated. Please use the Flask API with dynamic centrality computation.")
+    print("Example: Use compute_centrality(G, edges_gdf) in your API workflow")
+    return
 
 if __name__ == "__main__":
-    main()
+    example_usage()
