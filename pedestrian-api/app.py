@@ -150,7 +150,7 @@ def create_prediction_response(features_gdf, predictions, metadata) -> dict:
             "features": sample_features
         },
         "validation": make_json_serializable(metadata["validation"]),
-        "geojson": features_gdf.to_json()
+        "geojson": features_gdf.__geo_interface__
     }
     
     return response
