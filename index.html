@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pedestrian Volume Viewer</title>
+    
+    <!-- 
+    DEPLOYMENT NOTES:
+    
+    1. GitHub Pages: 
+       - Push this file to a GitHub repo
+       - Go to Settings > Pages > Deploy from branch (main)
+       - Access via: https://yourusername.github.io/yourrepo/
+    
+    2. Netlify:
+       - Drag and drop this file to netlify.com/drop
+       - Or connect GitHub repo to Netlify
+    
+    3. Before deploying:
+       - Replace <RENDER_URL> with your actual API URL
+       - Test in Incognito mode to verify CORS
+       - Ensure your Flask API has CORS enabled
+    
+    ARCGIS WEB APPBUILDER EMBEDDING CHECKLIST:
+    
+    □ Deploy this HTML file to a public hosting service
+    □ Create new Web App in ArcGIS Online
+    □ Add "Embed" widget to your app
+    □ Paste the hosted URL into the Embed widget
+    □ Set appropriate width/height for the widget
+    □ Share the Web App publicly if needed
+    □ Share any basemap data publicly
+    □ Test the embedded app in different browsers
+    -->
+    
+    <link rel="stylesheet" href="https://js.arcgis.com/4.28/esri/themes/light/main.css">
+    <style>
+        html, body {
+            padding: 0;
+            margin: 0;
+            height: 100%;
+            width: 100%;
+            font-family: Arial, Helvetica, sans-serif;
+        }
+        
+        #controls {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            z-index: 99;
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        #placeInput {
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            min-width: 200px;
+        }
+        
+        #runButton {
+            padding: 8px 15px;
+            background: #0079c1;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        
+        #runButton:hover {
+            background: #005a87;
+        }
+        
+        #runButton:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        #status {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        #mapDiv {
+            height: 100%;
+            width: 100%;
+        }
+        
+        .error {
+            color: #d32f2f;
+        }
+        
+        .success {
+            color: #2e7d32;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <input type="text" id="placeInput" placeholder="Enter place name (e.g., Monaco, Tel Aviv)" value="Monaco">
+        <button id="runButton">Run</button>
+        <span id="status"></span>
+    </div>
+    
+    <div id="mapDiv"></div>
+
+    <script src="https://js.arcgis.com/4.28/"></script>
+    <script>
+        require([
+            "esri/Map",
+            "esri/views/MapView",
+            "esri/layers/GeoJSONLayer",
+            "esri/renderers/ClassBreaksRenderer",
+            "esri/symbols/SimpleLineSymbol",
+            "esri/PopupTemplate"
+        ], function(Map, MapView, GeoJSONLayer, ClassBreaksRenderer, SimpleLineSymbol, PopupTemplate) {
+            
+            // Your Render API URL
+            const API_URL = "https://pedestrian-api.onrender.com";
+            
+            // Initialize map and view
+            const map = new Map({
+                basemap: "streets-navigation-vector"
+            });
+            
+            const view = new MapView({
+                container: "mapDiv",
+                map: map,
+                center: [2.3522, 48.8566], // Paris default
+                zoom: 10
+            });
+            
+            // UI elements
+            const placeInput = document.getElementById("placeInput");
+            const runButton = document.getElementById("runButton");
+            const status = document.getElementById("status");
+            
+            // Current layer reference
+            let currentLayer = null;
+            
+            // Status helper functions
+            function setStatus(message, type = "") {
+                status.textContent = message;
+                status.className = type;
+            }
+            
+            function setLoading(isLoading) {
+                runButton.disabled = isLoading;
+                runButton.textContent = isLoading ? "Loading..." : "Run";
+            }
+            
+            // Create popup template
+            const popupTemplate = new PopupTemplate({
+                title: "Street Segment",
+                content: [{
+                    type: "fields",
+                    fieldInfos: [
+                        {
+                            fieldName: "volume_bin",
+                            label: "Volume Bin",
+                            format: {
+                                digitSeparator: false,
+                                places: 0
+                            }
+                        },
+                        {
+                            fieldName: "highway",
+                            label: "Highway Type"
+                        },
+                        {
+                            fieldName: "land_use",
+                            label: "Land Use"
+                        },
+                        {
+                            fieldName: "closeness",
+                            label: "Closeness Centrality",
+                            format: {
+                                digitSeparator: true,
+                                places: 6
+                            }
+                        },
+                        {
+                            fieldName: "betweenness",
+                            label: "Betweenness Centrality",
+                            format: {
+                                digitSeparator: true,
+                                places: 6
+                            }
+                        }
+                    ]
+                }]
+            });
+            
+            // Create renderer for volume_bin (1-5)
+            function createVolumeRenderer() {
+                return new ClassBreaksRenderer({
+                    field: "volume_bin",
+                    classBreakInfos: [
+                        {
+                            minValue: 1,
+                            maxValue: 1,
+                            symbol: new SimpleLineSymbol({
+                                color: "#fee5d9",
+                                width: 2
+                            }),
+                            label: "Volume 1 (Lowest)"
+                        },
+                        {
+                            minValue: 2,
+                            maxValue: 2,
+                            symbol: new SimpleLineSymbol({
+                                color: "#fcbba1",
+                                width: 2.5
+                            }),
+                            label: "Volume 2"
+                        },
+                        {
+                            minValue: 3,
+                            maxValue: 3,
+                            symbol: new SimpleLineSymbol({
+                                color: "#fc9272",
+                                width: 3
+                            }),
+                            label: "Volume 3"
+                        },
+                        {
+                            minValue: 4,
+                            maxValue: 4,
+                            symbol: new SimpleLineSymbol({
+                                color: "#de2d26",
+                                width: 3.5
+                            }),
+                            label: "Volume 4"
+                        },
+                        {
+                            minValue: 5,
+                            maxValue: 5,
+                            symbol: new SimpleLineSymbol({
+                                color: "#a50f15",
+                                width: 4
+                            }),
+                            label: "Volume 5 (Highest)"
+                        }
+                    ]
+                });
+            }
+            
+            // Main prediction function
+            async function runPrediction() {
+                const place = placeInput.value.trim();
+                
+                if (!place) {
+                    setStatus("Please enter a place name", "error");
+                    return;
+                }
+                
+                setLoading(true);
+                setStatus("Fetching prediction data...");
+                
+                try {
+                    // Remove existing layer
+                    if (currentLayer) {
+                        map.remove(currentLayer);
+                        currentLayer = null;
+                    }
+                    
+                    // Fetch prediction data
+                    const response = await fetch(`${API_URL}/predict?place=${encodeURIComponent(place)}`);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    
+                    const data = await response.json();
+                    
+                    // Check for API errors
+                    if (!data.success) {
+                        throw new Error(data.error || "API returned unsuccessful response");
+                    }
+                    
+                    // Validate GeoJSON
+                    if (!data.geojson || !data.geojson.features || data.geojson.features.length === 0) {
+                        throw new Error("No street network data found for this location");
+                    }
+                    
+                    setStatus("Creating map layer...");
+                    
+                    // Create blob URL for GeoJSON
+                    const geojsonBlob = new Blob([JSON.stringify(data.geojson)], {
+                        type: "application/json"
+                    });
+                    const geojsonUrl = URL.createObjectURL(geojsonBlob);
+                    
+                    // Create GeoJSON layer
+                    currentLayer = new GeoJSONLayer({
+                        url: geojsonUrl,
+                        renderer: createVolumeRenderer(),
+                        popupTemplate: popupTemplate,
+                        title: `Pedestrian Volume - ${place}`
+                    });
+                    
+                    // Add layer to map
+                    map.add(currentLayer);
+                    
+                    // Wait for layer to load, then zoom to extent
+                    currentLayer.when(() => {
+                        return currentLayer.queryExtent();
+                    }).then((result) => {
+                        if (result.extent) {
+                            return view.goTo(result.extent.expand(1.2));
+                        }
+                    }).then(() => {
+                        const featureCount = data.geojson.features.length;
+                        setStatus(`Loaded ${featureCount} street segments`, "success");
+                        
+                        // Clean up blob URL after a delay
+                        setTimeout(() => {
+                            URL.revokeObjectURL(geojsonUrl);
+                        }, 1000);
+                    }).catch((error) => {
+                        console.error("Layer loading error:", error);
+                        setStatus("Layer loaded but couldn't zoom to extent", "error");
+                    });
+                    
+                } catch (error) {
+                    console.error("Prediction error:", error);
+                    
+                    // User-friendly error messages
+                    let errorMessage = "Failed to load prediction data";
+                    
+                    if (error.message.includes("Failed to fetch") || error.message.includes("NetworkError")) {
+                        errorMessage = "Network error - check your connection and API URL";
+                    } else if (error.message.includes("HTTP 404")) {
+                        errorMessage = "Location not found - try a different place name";
+                    } else if (error.message.includes("HTTP 500")) {
+                        errorMessage = "Server error - the API may be temporarily unavailable";
+                    } else if (error.message.includes("CORS")) {
+                        errorMessage = "CORS error - API may need to enable cross-origin requests";
+                    } else if (error.message) {
+                        errorMessage = error.message;
+                    }
+                    
+                    setStatus(errorMessage, "error");
+                } finally {
+                    setLoading(false);
+                }
+            }
+            
+            // Event listeners
+            runButton.addEventListener("click", runPrediction);
+            placeInput.addEventListener("keypress", (e) => {
+                if (e.key === "Enter") {
+                    runPrediction();
+                }
+            });
+            
+            // Initial status
+            setStatus("Enter a place name and click Run to view pedestrian volume predictions");
+        });
+    </script>
+</body>
+</html>
