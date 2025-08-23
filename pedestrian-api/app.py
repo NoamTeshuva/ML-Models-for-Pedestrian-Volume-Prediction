@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 # pedestrian-api/app.py
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
+import orjson
 import pandas as pd
 import logging
 import time
 from datetime import datetime
 from typing import Optional, Tuple
 from catboost import CatBoostClassifier, Pool
+import math
+import json
+import numpy as np
+import networkx as nx
+import geopandas as gpd
+from shapely.geometry import LineString, Point
+from shapely.ops import unary_union
 
 # Import the unified feature pipeline
 from feature_engineering.feature_pipeline import (
@@ -18,11 +26,21 @@ from feature_engineering.feature_pipeline import (
     PipelineConfig
 )
 
+# Import OSM tiles helper for ArcGIS integration
+from osm_tiles import edges_for_bbox, edges_from_place
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 app = Flask(__name__)
-CORS(app)
+
+ALLOWED_ORIGINS = [
+    "https://experience.arcgis.com",           # published Experience origin
+    "https://ariel-surveying.maps.arcgis.com", # org portal (useful for previews/embeds)
+    "http://localhost:3001"                    # Dev Edition (local)
+]
+
+CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS}})
 
 # Load the pre-trained CatBoost model
 try:
@@ -36,6 +54,191 @@ except Exception as e:
 # Use configuration from pipeline
 FEATS = PipelineConfig.FEATURE_COLUMNS
 CAT_COLS = PipelineConfig.CATEGORICAL_COLUMNS
+
+
+def _to_wgs84(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if gdf.crs is None:
+        gdf = gdf.set_crs(4326)
+    else:
+        gdf = gdf.to_crs(4326)
+    return gdf
+
+def _to_meters(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Project to WebMercator for length/geometry ops in meters."""
+    return gdf.to_crs(3857)
+
+def _apply_edits(base_edges: gpd.GeoDataFrame, edits: list, snap_tol_m: float = 8.0) -> gpd.GeoDataFrame:
+    """
+    Apply simple edit ops to base edges:
+      - {"op":"delete","edge_id":...}
+      - {"op":"add","geometry": LineString GeoJSON}
+      - {"op":"reshape","edge_id":...,"geometry": LineString GeoJSON}
+    Snap endpoints of added/reshaped lines to nearest base endpoints within snap_tol_m.
+    """
+    if base_edges.empty:
+        base_edges = gpd.GeoDataFrame(columns=["edge_id","osmid","highway","length","geometry"], geometry="geometry", crs=4326)
+
+    # Work in meters for snapping
+    g_m = _to_meters(_to_wgs84(base_edges)).copy()
+    # Precompute endpoint index (naive, small bbox)
+    endpoints = []
+    for idx, geom in g_m.geometry.items():
+        if geom is None or geom.is_empty: continue
+        try:
+            xs, ys = list(geom.coords)[0], list(geom.coords)[-1]
+            endpoints.append((idx, Point(xs[0], xs[1])))
+            endpoints.append((idx, Point(ys[0], ys[1])))
+        except Exception:
+            pass
+    ep_gdf = gpd.GeoDataFrame({"edge_row":[i for i,_ in endpoints]}, geometry=[p for _,p in endpoints], crs=3857)
+
+    def _snap_ls(ls: LineString) -> LineString:
+        if ep_gdf.empty: return ls
+        # snap both ends if within tol
+        coords = list(ls.coords)
+        P0 = Point(coords[0]); P1 = Point(coords[-1])
+        for i,P in [(0,P0),(len(coords)-1,P1)]:
+            dists = ep_gdf.distance(P)
+            j = int(dists.idxmin()) if len(dists) else None
+            if j is not None and dists.loc[j] <= snap_tol_m:
+                # move coord to nearest endpoint
+                coords[i] = (ep_gdf.loc[j].geometry.x, ep_gdf.loc[j].geometry.y)
+        return LineString(coords)
+
+    # Build mutable copy in meters
+    out = g_m.copy()
+
+    for e in edits or []:
+        op = (e.get("op") or e.get("action") or "").lower()
+        if op == "delete" and e.get("edge_id"):
+            out = out[out["edge_id"] != e["edge_id"]].copy()
+
+        elif op in ("add","reshape"):
+            geom_geojson = e.get("geometry")
+            if not geom_geojson or geom_geojson.get("type") != "LineString":
+                continue
+            # incoming geometry is WGS84 → to meters
+            new_wgs = gpd.GeoSeries([LineString(geom_geojson["coordinates"])], crs=4326).to_crs(3857).iloc[0]
+            new_ls = _snap_ls(new_wgs)
+            # basic attrs
+            hw = str(e.get("highway") or "unclassified")
+            row = {
+                "edge_id": e.get("edge_id") or f"e_add_{len(out)+1:06d}",
+                "osmid": e.get("osmid") or None,
+                "highway": hw,
+                "length": new_ls.length,
+                "geometry": new_ls
+            }
+            if op == "reshape" and e.get("edge_id"):
+                out = out[out["edge_id"] != e["edge_id"]].copy()
+            out = gpd.GeoDataFrame(pd.concat([out, gpd.GeoDataFrame([row], geometry="geometry", crs=3857)], ignore_index=True))
+        else:
+            # ignore unknown ops
+            pass
+
+    # back to WGS84 and recompute length (meters)
+    out_wgs = out.to_crs(4326)
+    out_m   = out  # already meters
+    out_wgs["length"] = out_m.length
+    # normalize columns
+    keep = [c for c in ["edge_id","osmid","highway","length","geometry"] if c in out_wgs.columns]
+    out_wgs = out_wgs[keep]
+    return out_wgs
+
+def _graph_from_edges(edges_wgs: gpd.GeoDataFrame) -> nx.Graph:
+    """
+    Build an undirected graph where nodes are rounded endpoints (to ~1e-6 deg),
+    edges carry length and a reference to edge_id(s). Good enough for centrality.
+    """
+    if edges_wgs.empty:
+        return nx.Graph()
+    E = _to_meters(edges_wgs)
+    G = nx.Graph()
+    for _, row in E.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty: continue
+        coords = list(geom.coords)
+        # Ensure coordinates are hashable tuples of floats
+        def coord_to_tuple(coord):
+            # Handle various coordinate types (lists, tuples, numpy arrays)
+            if hasattr(coord[0], 'item'):  # numpy scalar
+                return (round(coord[0].item(), 3), round(coord[1].item(), 3))
+            else:
+                return (round(float(coord[0]), 3), round(float(coord[1]), 3))
+        
+        u = coord_to_tuple(coords[0])
+        v = coord_to_tuple(coords[-1])
+        wlen = float(geom.length)
+        eid  = row.get("edge_id")
+        if not G.has_edge(u, v):
+            G.add_edge(u, v, length=wlen, edge_ids=set())
+        G[u][v]["edge_ids"].add(eid)
+    return G
+
+def _centrality_features(G: nx.Graph, k: int = 60) -> dict:
+    """
+    Compute fast approx centrality:
+      - edge betweenness (k-sampled)
+      - node closeness → edge_closeness = avg of endpoints
+    Returns dict: edge_id -> {"edge_betweenness":..., "edge_closeness":...}
+    """
+    if G.number_of_edges() == 0:
+        return {}
+    # k-sample nodes for betweenness
+    nodes = list(G.nodes())
+    # Debug: check node types
+    for i, node in enumerate(nodes[:3]):  # Check first 3 nodes
+        logging.info(f"Node {i}: {node} (type: {type(node)})")
+    if len(nodes) <= k:
+        k_nodes = nodes
+    else:
+        rng = np.random.default_rng(42)
+        k_nodes = list(rng.choice(nodes, size=k, replace=False))
+    eb = nx.edge_betweenness_centrality_subset(G, sources=k_nodes, targets=k_nodes, weight="length", normalized=True)
+    # closeness per node (distance-weighted)
+    cn = nx.closeness_centrality(G, distance="length")
+    # map to edges by averaging endpoint closeness
+    out = {}
+    for (u, v), b in eb.items():
+        ids = G[u][v]["edge_ids"]
+        c = 0.5*(cn.get(u, 0.0) + cn.get(v, 0.0))
+        for eid in ids:
+            out[eid] = {"edge_betweenness": float(b), "edge_closeness": float(c)}
+    return out
+
+def _highway_ordinal(hw) -> float:
+    # Handle both string and list cases
+    if isinstance(hw, list):
+        hw = hw[0] if hw else ""
+    hw = str(hw or "").lower()
+    if hw in ("footway","path","steps","pedestrian"): return 0.5
+    if hw in ("residential","living_street","service","unclassified"): return 1.0
+    if hw in ("tertiary","tertiary_link"): return 2.0
+    if hw in ("secondary","secondary_link"): return 3.0
+    if hw in ("primary","primary_link"): return 4.0
+    return 1.5
+
+def _build_features(edges_wgs: gpd.GeoDataFrame, cen: dict, feature_order: list | None) -> pd.DataFrame:
+    """
+    Build a feature table aligned with FEATURE_ORDER if provided.
+    Minimal set if not provided: edge_length_m, edge_betweenness, edge_closeness, highway_ord
+    """
+    df = edges_wgs.copy()
+    df["edge_length_m"] = df["length"].astype(float)
+    df["edge_betweenness"] = df["edge_id"].map(lambda i: cen.get(i, {}).get("edge_betweenness", 0.0))
+    df["edge_closeness"]   = df["edge_id"].map(lambda i: cen.get(i, {}).get("edge_closeness", 0.0))
+    df["highway_ord"]      = df["highway"].map(_highway_ordinal)
+
+    if feature_order:
+        # create missing columns as zeros, keep only order
+        for col in feature_order:
+            if col not in df.columns:
+                df[col] = 0.0
+        X = df[feature_order].copy()
+    else:
+        X = df[["edge_length_m","edge_betweenness","edge_closeness","highway_ord"]].copy()
+    X = X.replace([np.inf,-np.inf], 0).fillna(0)
+    return df, X
 
 
 def validate_request_params(place: Optional[str], bbox_str: Optional[str], date: Optional[str]) -> Tuple[Optional[str], Optional[Tuple[float, float, float, float]], Optional[str]]:
@@ -160,6 +363,128 @@ def create_prediction_response(features_gdf, predictions, metadata) -> dict:
 def ping():
     """Health check endpoint."""
     return jsonify({"pong": True})
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Health check endpoint."""
+    return jsonify({"status":"ok","service":"pedestrian-api","arcgis":True})
+
+
+@app.route("/base-network", methods=["GET"])
+def base_network():
+    """Get OSM walk network edges for ArcGIS."""
+    try:
+        place = request.args.get("place")
+        bbox = request.args.get("bbox")
+        max_features = request.args.get("max_features", 5000, type=int)
+        
+        if place:
+            gdf = edges_from_place(place, max_features)
+            return Response(gdf.to_json(), mimetype="application/json")
+            
+        if not bbox:
+            return jsonify({"error":"provide ?place=... or ?bbox=w,s,e,n"}), 400
+            
+        try:
+            w, s, e, n = map(float, bbox.split(","))
+        except Exception:
+            return jsonify({"error":"bbox must be 'west,south,east,north'"}), 400
+            
+        gdf = edges_for_bbox(w, s, e, n, max_features)
+        return Response(gdf.to_json(), mimetype="application/json")
+        
+    except Exception as e:
+        logging.error(f"Error in base_network: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/simulate", methods=["POST"])
+def simulate():
+    """
+    PLACE-FIRST simulate:
+      payload = {
+        "place": "Tel Aviv, Israel",         # preferred
+        "edits": [ { "op": "...", ... } ],
+        "max_features": 8000                 # optional
+      }
+    Fallback if place missing:
+      payload = { "bbox": "w,s,e,n", "edits":[...], "max_features": ... }
+    Returns: GeoJSON FeatureCollection with pred_before, pred_after, delta.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        place = payload.get("place", None)
+        bbox  = payload.get("bbox", None)
+        edits = payload.get("edits", [])
+        max_features = int(payload.get("max_features", 8000))
+        if not isinstance(edits, list):
+            return jsonify({"error":"edits must be a list"}), 400
+
+        # -------------------------------
+        # 1) Baseline edges (PLACE first)
+        # -------------------------------
+        if place and isinstance(place, str) and place.strip():
+            base_edges = edges_from_place(place.strip(), max_features=max_features)
+        elif bbox:
+            try:
+                w,s,e,n = [float(x) for x in str(bbox).split(",")]
+                assert w < e and s < n
+            except Exception:
+                return jsonify({"error":"bbox must be 'west,south,east,north' (WGS84)"}), 400
+            base_edges = edges_for_bbox(w,s,e,n, max_features=max_features)
+        else:
+            return jsonify({"error":"provide 'place' or 'bbox'"}), 400
+
+        base_edges = base_edges[["edge_id","osmid","highway","length","geometry"]].copy()
+
+        # 2) Apply edits → scenario edges
+        scen_edges = _apply_edits(base_edges, edits, snap_tol_m=8.0)
+
+        # 3) Skip complex centrality for now, use simple proxy
+        # G0 = _graph_from_edges(base_edges)
+        # G1 = _graph_from_edges(scen_edges)
+        # cen0 = _centrality_features(G0, k=60)
+        # cen1 = _centrality_features(G1, k=60)
+        cen0 = {}  # Use empty centrality for now
+        cen1 = {}
+
+        # 4) Features aligned to FEATURE_ORDER if present
+        feature_order = globals().get("FEATURE_ORDER", None)
+        df0, X0 = _build_features(base_edges, cen0, feature_order)
+        df1, X1 = _build_features(scen_edges, cen1, feature_order)
+
+        # 5) Predict with CatBoost if loaded, else centrality proxy
+        m = globals().get("model", None)
+        if m is None:
+            df0["pred"] = df0["edge_betweenness"]*1000
+            df1["pred"] = df1["edge_betweenness"]*1000
+        else:
+            try:
+                p0 = m.predict(X0.values)
+                p1 = m.predict(X1.values)
+            except Exception:
+                p0 = np.zeros(len(X0), dtype=float)
+                p1 = np.zeros(len(X1), dtype=float)
+            df0["pred"] = p0.astype(float)
+            df1["pred"] = p1.astype(float)
+
+        # 6) Join BEFORE vs AFTER by edge_id
+        left = df0[["edge_id","pred"]].rename(columns={"pred":"pred_before"})
+        right = df1[["edge_id","pred"]].rename(columns={"pred":"pred_after"})
+        merged = right.merge(left, on="edge_id", how="left")
+        merged["pred_before"] = merged["pred_before"].fillna(0.0)
+        merged["delta"] = merged["pred_after"] - merged["pred_before"]
+
+        # 7) Attach props, return GeoJSON
+        scen = scen_edges.merge(merged[["edge_id","pred_before","pred_after","delta"]],
+                                on="edge_id", how="left").fillna({"pred_before":0.0,"pred_after":0.0,"delta":0.0})
+        return Response(scen.to_json(), mimetype="application/json")
+
+    except Exception as e:
+        logging.exception("simulate failed")
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 @app.route("/predict", methods=["GET"])
