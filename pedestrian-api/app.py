@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # pedestrian-api/app.py
 
+# Optional orjson shim (safe on Python 3.11/3.13 with or without orjson installed)
+try:
+    import orjson as _orjson
+    def fast_dumps(obj) -> bytes:
+        return _orjson.dumps(obj)  # returns bytes
+except Exception:
+    import json as _json
+    def fast_dumps(obj) -> bytes:
+        # compact, UTF-8 JSON bytes (approximate orjson defaults)
+        return _json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-import orjson
 import pandas as pd
 import logging
 import time
@@ -41,6 +51,9 @@ ALLOWED_ORIGINS = [
 ]
 
 CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS}})
+
+def json_response(obj, status: int = 200) -> Response:
+    return Response(fast_dumps(obj), status=status, mimetype="application/json")
 
 # Load the pre-trained CatBoost model
 try:
@@ -381,7 +394,7 @@ def base_network():
         
         if place:
             gdf = edges_from_place(place, max_features)
-            return Response(gdf.to_json(), mimetype="application/json")
+            return json_response(gdf.__geo_interface__)
             
         if not bbox:
             return jsonify({"error":"provide ?place=... or ?bbox=w,s,e,n"}), 400
@@ -392,7 +405,7 @@ def base_network():
             return jsonify({"error":"bbox must be 'west,south,east,north'"}), 400
             
         gdf = edges_for_bbox(w, s, e, n, max_features)
-        return Response(gdf.to_json(), mimetype="application/json")
+        return json_response(gdf.__geo_interface__)
         
     except Exception as e:
         logging.error(f"Error in base_network: {e}")
@@ -479,7 +492,7 @@ def simulate():
         # 7) Attach props, return GeoJSON
         scen = scen_edges.merge(merged[["edge_id","pred_before","pred_after","delta"]],
                                 on="edge_id", how="left").fillna({"pred_before":0.0,"pred_after":0.0,"delta":0.0})
-        return Response(scen.to_json(), mimetype="application/json")
+        return json_response(scen.__geo_interface__)
 
     except Exception as e:
         logging.exception("simulate failed")

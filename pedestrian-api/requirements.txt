@@ -21,3 +21,4 @@ networkx>=3.1.0
 
 # Utilities
 requests>=2.31.0
+orjson>=3.9.2; python_version < "3.13"
