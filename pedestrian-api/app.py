@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # pedestrian-api/app.py
 
+# --- ensure sibling modules (like osm_tiles.py) are importable in Render ---
+import os, sys
+sys.path.insert(0, os.path.dirname(__file__))
+# ---------------------------------------------------------------------------
+
 # Optional orjson shim (safe on Python 3.11/3.13 with or without orjson installed)
 try:
     import orjson as _orjson
