@@ -3,7 +3,12 @@
 
 # --- ensure sibling modules (like osm_tiles.py) are importable in Render ---
 import os, sys
-sys.path.insert(0, os.path.dirname(__file__))
+# Add both the directory containing this file and the current working directory
+app_dir = os.path.dirname(os.path.abspath(__file__))
+if app_dir not in sys.path:
+    sys.path.insert(0, app_dir)
+if os.getcwd() not in sys.path:
+    sys.path.insert(0, os.getcwd())
 # ---------------------------------------------------------------------------
 
 # Optional orjson shim (safe on Python 3.11/3.13 with or without orjson installed)
@@ -42,7 +47,22 @@ from feature_engineering.feature_pipeline import (
 )
 
 # Import OSM tiles helper for ArcGIS integration
-from osm_tiles import edges_for_bbox, edges_from_place
+try:
+    from osm_tiles import edges_for_bbox, edges_from_place
+except ImportError as e:
+    # Fallback: try importing from current directory
+    import importlib.util
+    import sys
+    osm_tiles_path = os.path.join(os.path.dirname(__file__), 'osm_tiles.py')
+    if os.path.exists(osm_tiles_path):
+        spec = importlib.util.spec_from_file_location("osm_tiles", osm_tiles_path)
+        osm_tiles = importlib.util.module_from_spec(spec)
+        sys.modules["osm_tiles"] = osm_tiles
+        spec.loader.exec_module(osm_tiles)
+        edges_for_bbox = osm_tiles.edges_for_bbox
+        edges_from_place = osm_tiles.edges_from_place
+    else:
+        raise ImportError(f"Could not import osm_tiles: {e}. File not found at {osm_tiles_path}")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
