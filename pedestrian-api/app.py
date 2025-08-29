@@ -50,19 +50,69 @@ from feature_engineering.feature_pipeline import (
 try:
     from osm_tiles import edges_for_bbox, edges_from_place
 except ImportError as e:
-    # Fallback: try importing from current directory
+    # Fallback: search multiple locations for osm_tiles.py
     import importlib.util
-    import sys
-    osm_tiles_path = os.path.join(os.path.dirname(__file__), 'osm_tiles.py')
-    if os.path.exists(osm_tiles_path):
+    import glob
+    
+    # Debug info for troubleshooting
+    print(f"DEBUG: __file__ = {__file__}")
+    print(f"DEBUG: os.path.dirname(__file__) = {os.path.dirname(__file__)}")
+    print(f"DEBUG: os.getcwd() = {os.getcwd()}")
+    print(f"DEBUG: sys.path = {sys.path[:3]}...")  # First 3 entries
+    
+    # Search locations in order of preference
+    search_paths = [
+        os.path.join(os.path.dirname(__file__), 'osm_tiles.py'),           # Same dir as app.py
+        os.path.join(os.getcwd(), 'osm_tiles.py'),                         # Current working dir
+        os.path.join(os.getcwd(), 'pedestrian-api', 'osm_tiles.py'),       # CWD/pedestrian-api/
+        os.path.join(os.path.dirname(__file__), '..', 'osm_tiles.py'),     # Parent dir
+    ]
+    
+    # Also search with glob pattern
+    glob_patterns = [
+        '**/osm_tiles.py',
+        'pedestrian-api/osm_tiles.py',
+        './osm_tiles.py'
+    ]
+    
+    for pattern in glob_patterns:
+        try:
+            found_files = glob.glob(pattern, recursive=True)
+            search_paths.extend(found_files)
+        except:
+            pass
+    
+    print(f"DEBUG: Searching for osm_tiles.py in {len(search_paths)} locations...")
+    
+    osm_tiles_path = None
+    for path in search_paths:
+        print(f"DEBUG: Checking {path}")
+        if os.path.exists(path):
+            osm_tiles_path = path
+            print(f"DEBUG: Found osm_tiles.py at {path}")
+            break
+    
+    if osm_tiles_path:
         spec = importlib.util.spec_from_file_location("osm_tiles", osm_tiles_path)
         osm_tiles = importlib.util.module_from_spec(spec)
         sys.modules["osm_tiles"] = osm_tiles
         spec.loader.exec_module(osm_tiles)
         edges_for_bbox = osm_tiles.edges_for_bbox
         edges_from_place = osm_tiles.edges_from_place
+        print(f"DEBUG: Successfully loaded osm_tiles from {osm_tiles_path}")
     else:
-        raise ImportError(f"Could not import osm_tiles: {e}. File not found at {osm_tiles_path}")
+        # List all files in current directory for debugging
+        try:
+            files = os.listdir(os.path.dirname(__file__) or '.')
+            print(f"DEBUG: Files in app directory: {files}")
+        except:
+            pass
+        try:
+            files = os.listdir(os.getcwd())
+            print(f"DEBUG: Files in working directory: {files}")
+        except:
+            pass
+        raise ImportError(f"Could not import osm_tiles: {e}. Searched {len(search_paths)} locations but file not found.")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
