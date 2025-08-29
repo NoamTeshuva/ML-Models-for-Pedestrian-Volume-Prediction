@@ -139,6 +139,23 @@ CORS(app, resources={
 def json_response(obj, status: int = 200) -> Response:
     return Response(fast_dumps(obj), status=status, mimetype="application/json")
 
+def clean_geojson(geojson_dict):
+    """Clean GeoJSON by replacing NaN values with null."""
+    import json
+    import math
+    
+    def clean_value(obj):
+        if isinstance(obj, dict):
+            return {k: clean_value(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [clean_value(item) for item in obj]
+        elif isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        else:
+            return obj
+    
+    return clean_value(geojson_dict)
+
 # Load the pre-trained CatBoost model
 try:
     model = CatBoostClassifier()
@@ -478,7 +495,8 @@ def base_network():
         
         if place:
             gdf = edges_from_place(place, max_features)
-            return json_response(gdf.__geo_interface__)
+            clean_data = clean_geojson(gdf.__geo_interface__)
+            return json_response(clean_data)
             
         if not bbox:
             return jsonify({"error":"provide ?place=... or ?bbox=w,s,e,n"}), 400
@@ -489,7 +507,8 @@ def base_network():
             return jsonify({"error":"bbox must be 'west,south,east,north'"}), 400
             
         gdf = edges_for_bbox(w, s, e, n, max_features)
-        return json_response(gdf.__geo_interface__)
+        clean_data = clean_geojson(gdf.__geo_interface__)
+        return json_response(clean_data)
         
     except Exception as e:
         logging.error(f"Error in base_network: {e}")
@@ -576,7 +595,10 @@ def simulate():
         # 7) Attach props, return GeoJSON
         scen = scen_edges.merge(merged[["edge_id","pred_before","pred_after","delta"]],
                                 on="edge_id", how="left").fillna({"pred_before":0.0,"pred_after":0.0,"delta":0.0})
-        return json_response(scen.__geo_interface__)
+        
+        # Clean NaN values before serialization
+        clean_geojson_data = clean_geojson(scen.__geo_interface__)
+        return json_response(clean_geojson_data)
 
     except Exception as e:
         logging.exception("simulate failed")
