@@ -120,12 +120,21 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 app = Flask(__name__)
 
 ALLOWED_ORIGINS = [
+    "http://localhost:5173",                   # Vite dev
+    "http://localhost:3001",                   # Experience Builder dev
     "https://experience.arcgis.com",           # published Experience origin
     "https://ariel-surveying.maps.arcgis.com", # org portal (useful for previews/embeds)
-    "http://localhost:3001"                    # Dev Edition (local)
+    "https://pedestrian-api.onrender.com",     # current API hosting
+    "https://<your-site>.netlify.app"         # alt hosting
 ]
 
-CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS}})
+CORS(app, resources={
+    r"/*": {
+        "origins": ALLOWED_ORIGINS,
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 def json_response(obj, status: int = 200) -> Response:
     return Response(fast_dumps(obj), status=status, mimetype="application/json")
