@@ -1,0 +1,76 @@
+# Area of Interest (AOI) presets for raster fetching
+# All bounding boxes in WGS84 (EPSG:4326) format: [west, south, east, north]
+
+# Full city extents for production raster fetching
+melbourne:
+  bbox: [144.40, -38.05, 145.55, -37.50]
+  description: "Greater Melbourne metropolitan area"
+  seasonal_months: [12, 1, 2]  # Summer (leaf-on for Southern Hemisphere)
+  timezone: "Australia/Melbourne"
+
+NewYork:
+  bbox: [-74.30, 40.45, -73.60, 41.05]
+  description: "New York City metropolitan area (5 boroughs + surroundings)"
+  seasonal_months: [6, 7, 8, 9]  # Summer/early fall (leaf-on for Northern Hemisphere)
+  timezone: "America/New_York"
+
+zurich:
+  bbox: [8.38, 47.28, 8.65, 47.45]
+  description: "Zurich metropolitan area, Switzerland"
+  seasonal_months: [6, 7, 8, 9]  # Summer/early fall (leaf-on for Northern Hemisphere)
+  timezone: "Europe/Zurich"
+
+dublin:
+  bbox: [-6.45, 53.26, -6.05, 53.41]
+  description: "Dublin metropolitan area, Ireland"
+  seasonal_months: [6, 7, 8, 9]  # Summer/early fall (leaf-on for Northern Hemisphere)
+  timezone: "Europe/Dublin"
+
+# Small CBD areas for smoke testing (fast downloads)
+melbourne_cbd:
+  bbox: [144.90, -37.84, 145.05, -37.76]
+  description: "Melbourne Central Business District (small test area)"
+  seasonal_months: [12, 1, 2]
+  timezone: "Australia/Melbourne"
+
+NewYork_cbd:
+  bbox: [-74.02, 40.70, -73.97, 40.78]
+  description: "Manhattan Financial District (small test area)"
+  seasonal_months: [6, 7, 8, 9]
+  timezone: "America/New_York"
+
+zurich_cbd:
+  bbox: [8.53, 47.36, 8.56, 47.39]
+  description: "Zurich city center (small test area)"
+  seasonal_months: [6, 7, 8, 9]
+  timezone: "Europe/Zurich"
+
+dublin_cbd:
+  bbox: [-6.27, 53.34, -6.24, 53.36]
+  description: "Dublin city center (small test area)"
+  seasonal_months: [6, 7, 8, 9]
+  timezone: "Europe/Dublin"
+
+# Quality control thresholds per city type
+quality_thresholds:
+  full_city:
+    dem_coverage_min: 0.80  # 80% DEM coverage required
+    ndvi_coverage_min: 0.60  # 60% NDVI coverage required
+    ndvi_valid_min: 0.30     # 30% of pixels should be > 0 (vegetation)
+  
+  cbd_test:
+    dem_coverage_min: 0.50   # Relaxed for small test areas
+    ndvi_coverage_min: 0.30  # Relaxed for urban cores
+    ndvi_valid_min: 0.15     # Urban areas have less vegetation
+
+# STAC catalog endpoints
+stac_catalogs:
+  planetary_computer:
+    url: "https://planetarycomputer.microsoft.com/api/stac/v1"
+    dem_collection: "cop-dem-glo-30"
+    requires_auth: false
+  
+  earth_search:
+    url: "https://earth-search.aws.element84.com/v1"
+    sentinel2_collection: "sentinel-2-l2a"
+    requires_auth: false
