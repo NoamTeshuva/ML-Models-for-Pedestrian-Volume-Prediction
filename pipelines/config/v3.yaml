@@ -1,0 +1,243 @@
+# v3 Environmental Feature Extraction Configuration
+# 
+# Configuration for v3 segment-based topography and seasonal canopy feature extraction.
+# Supports per-city parameter optimization and fallback strategies.
+
+# Global defaults (2023-optimized)
+defaults:
+  extractor_version: "v3"
+  year: 2023
+  emit_v2_names: true
+  
+  # Topography v3 parameters
+  topography_v3:
+    max_seg_m: 20.0              # Maximum segment length (meters)
+    smooth_window: 3             # Rolling median window size  
+    min_valid_fraction: 0.2      # Minimum valid segments per edge
+    dem_nodata: -32768           # DEM nodata value
+    bridge_artifact_threshold: 15.0  # Grade threshold for bridge detection (%)
+    
+  # Green canopy v3 parameters  
+  green_canopy_v3:
+    buffer_m: 25.0               # Analysis buffer around edges (meters)
+    ndvi_threshold: 0.2          # Vegetation threshold (normalized)
+    ndvi_rescale: "auto"         # Auto-detect NDVI scaling
+    min_coverage: 0.3            # Minimum raster coverage before vector fallback
+    treat_zero_as_nodata: true   # Treat zero values as missing data
+    
+  # Quality thresholds
+  quality_gates:
+    dem_coverage_min: 0.7        # Minimum DEM coverage fraction
+    ndvi_coverage_min: 0.3       # Minimum NDVI coverage fraction
+    sensor_enrichment_min: 0.85  # Minimum sensor environmental enrichment
+    grade_p99_max: 50.0          # Maximum 99th percentile grade (%)
+    canopy_range_valid_min: 0.95 # Minimum fraction with valid [0,1] canopy values
+
+# City-specific configurations
+cities:
+  melbourne:
+    extractor_version: "v3"
+    fallback_to_v2: true
+    
+    # Data paths
+    data_paths:
+      network: "data/processed/melbourne/gpkg/street_network_2023_melbourne.gpkg"
+      dem: "data/processed/melbourne/raster/dem_2023_melbourne.tif"
+      ndvi: "data/processed/melbourne/raster/green_2023_melbourne.tif"
+      ndvi_multiband: "data/processed/melbourne/raster/green_2023_melbourne_multiband.tif"
+      landuse: "data/processed/melbourne/gpkg/landuse_2023_melbourne.gpkg"
+    
+    # Melbourne-specific parameters (relatively flat terrain)
+    topography_v3:
+      max_seg_m: 20.0
+      smooth_window: 3
+      min_valid_fraction: 0.2
+      
+    green_canopy_v3:
+      buffer_m: 25.0
+      ndvi_threshold: 0.25         # Higher threshold for Australian vegetation
+      min_coverage: 0.3
+      
+  newyork:
+    extractor_version: "v3" 
+    fallback_to_v2: true
+    
+    # Data paths
+    data_paths:
+      network: "data/processed/NewYork/gpkg/street_network_2023_newyork.gpkg"
+      dem: "data/processed/NewYork/raster/dem_2023_newyork.tif"
+      ndvi: "data/processed/NewYork/raster/green_2023_newyork.tif"
+      landuse: "data/processed/NewYork/gpkg/landuse_2023_newyork.gpkg"
+    
+    # NYC-specific parameters (urban canyons, moderate terrain)
+    topography_v3:
+      max_seg_m: 20.0
+      smooth_window: 3
+      min_valid_fraction: 0.2
+      bridge_artifact_threshold: 20.0  # Higher threshold for urban infrastructure
+      
+    green_canopy_v3:
+      buffer_m: 25.0
+      ndvi_threshold: 0.2
+      min_coverage: 0.25           # Lower coverage threshold (dense urban)
+      
+  zurich:
+    extractor_version: "v3"
+    fallback_to_v2: true
+    
+    # Data paths  
+    data_paths:
+      network: "data/processed/zurich/gpkg/street_network_2023_zurich.gpkg"
+      dem: "data/processed/zurich/raster/dem_2023_zurich.tif"
+      ndvi: "data/processed/zurich/raster/green_2023_zurich.tif"
+      landuse: "data/processed/zurich/gpkg/landuse_2023_zurich.gpkg"
+    
+    # Zurich-specific parameters (Alpine terrain, precise slopes needed)
+    topography_v3:
+      max_seg_m: 15.0              # Shorter segments for precise Alpine terrain
+      smooth_window: 5             # More smoothing for noisy Alpine DEM
+      min_valid_fraction: 0.15     # Lower threshold due to challenging terrain
+      bridge_artifact_threshold: 12.0  # Lower threshold for steep legitimate terrain
+      
+    green_canopy_v3:
+      buffer_m: 30.0               # Larger buffer for Alpine vegetation patterns
+      ndvi_threshold: 0.3          # Higher threshold for Alpine vegetation
+      min_coverage: 0.4            # Higher coverage requirement
+      
+  dublin:
+    extractor_version: "v2"        # Keep v2 for now (limited data)
+    fallback_to_v2: true
+    
+    # Data paths
+    data_paths:
+      network: "data/processed/dublin/gpkg/street_network_2023_dublin.gpkg"
+      dem: "data/processed/dublin/raster/dem_2023_dublin.tif"  
+      ndvi: "data/processed/dublin/raster/green_2023_dublin.tif"
+      
+    # Standard v2 parameters
+    topography_v2:
+      sample_interval: 10.0
+      min_samples: 3
+      
+    green_canopy_v2:
+      buffer_m: 25.0
+      ndvi_threshold: 0.2
+
+# Processing configuration
+processing:
+  # Memory and performance settings
+  chunk_size: 10000              # Edges per processing chunk
+  max_workers: 4                 # Parallel processing threads
+  memory_limit_gb: 16            # Memory usage limit
+  
+  # Timeout settings (minutes)
+  timeouts:
+    topography_extraction: 60
+    canopy_extraction: 90
+    sensor_mapping: 30
+    model_training: 120
+    
+  # Output settings
+  output:
+    save_intermediate: false     # Save intermediate processing files
+    compress_outputs: true       # Compress large output files
+    backup_v2_results: true      # Keep v2 results as backup
+
+# Monitoring and alerts
+monitoring:
+  # Coverage thresholds that trigger warnings
+  warning_thresholds:
+    dem_coverage_low: 0.5        # Warn if DEM coverage < 50%
+    ndvi_coverage_low: 0.2       # Warn if NDVI coverage < 20%  
+    vector_fallback_high: 0.5    # Warn if >50% edges use vector fallback
+    processing_time_high: 120    # Warn if processing > 2 hours
+    
+  # Quality checks that trigger errors
+  error_thresholds:
+    dem_coverage_critical: 0.1   # Error if DEM coverage < 10%
+    feature_extraction_fail: 0.9 # Error if >90% features missing
+    model_accuracy_regression: 0.05  # Error if accuracy drops >5pp
+    
+# Fallback strategies
+fallbacks:
+  # When to use v2 instead of v3
+  v2_fallback_triggers:
+    - dem_coverage < 0.3
+    - processing_time > 180      # > 3 hours
+    - memory_usage > 20          # > 20GB
+    - error_rate > 0.1           # > 10% failure rate
+    
+  # Vector canopy fallback configuration
+  vector_canopy:
+    enable: true
+    osm_tags:
+      forest: 0.9                # Dense tree cover
+      grass: 0.6                 # Open grass areas
+      recreation_ground: 0.4     # Mixed use parks  
+      park: 0.5                  # Urban parks
+      garden: 0.6                # Private/community gardens
+      wood: 0.9                  # Natural woodlands
+      grassland: 0.7             # Natural grasslands
+      scrub: 0.5                 # Shrubland
+      
+  # DEM fallback sources (in priority order)
+  dem_sources:
+    - "dem_2023_{city}.tif"      # Primary high-resolution DEM
+    - "dem_srtm_{city}.tif"      # SRTM fallback
+    - "dem_aster_{city}.tif"     # ASTER fallback
+
+# Validation settings
+validation:
+  # Cross-validation for model evaluation
+  cross_validation:
+    folds: 5
+    stratify: true
+    shuffle: true
+    random_state: 42
+    
+  # Feature importance analysis
+  feature_importance:
+    top_n: 20                    # Number of top features to report
+    env_feature_patterns:        # Patterns to identify environmental features
+      - "grade"
+      - "elev" 
+      - "canopy"
+      - "topo"
+      - "green"
+      - "ndvi"
+      
+  # Statistical tests for v2 vs v3 comparison
+  comparison_tests:
+    correlation_threshold: 0.5   # Minimum correlation for consistency
+    ks_test_alpha: 0.05         # Significance level for K-S test
+    coverage_improvement_min: 0.05  # Minimum improvement to be significant
+
+# Reporting configuration  
+reporting:
+  # Output formats
+  formats:
+    json: true                   # Detailed JSON reports
+    markdown: true               # Human-readable markdown summaries
+    csv: true                    # Feature importance tables
+    plots: false                 # Comparison plots (requires matplotlib)
+    
+  # Report sections to include
+  sections:
+    coverage_analysis: true
+    distribution_comparison: true
+    feature_importance: true
+    model_performance: true
+    recommendations: true
+    
+  # File naming conventions
+  naming:
+    timestamp_format: "%Y%m%d_%H%M%S"
+    include_city_year: true
+    
+# Development and debugging
+debug:
+  verbose_logging: false
+  save_debug_files: false
+  profile_performance: false
+  validate_inputs: true
+  skip_slow_tests: false

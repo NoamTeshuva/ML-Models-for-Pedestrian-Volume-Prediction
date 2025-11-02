@@ -1,0 +1,348 @@
+# Cities Configuration
+# Defines paths, parameters, and settings for each city in the pedestrian volume prediction system
+
+# Global defaults (applied to all cities unless overridden)
+defaults:
+  year: 2023  # Default modeling year
+  
+  # Network extraction parameters
+  edges_layer: "edges"
+  target_crs: "EPSG:3857"
+  
+  # Environmental feature extraction
+  topography:
+    sample_every_m: 10.0
+    min_valid_fraction: 0.2
+    dem_nodata: -32768
+  
+  canopy:
+    buffer_m: 25.0
+    ndvi_rescale: "auto"  # auto-detect scaling
+    ndvi_threshold: 0.2   # normalized threshold
+    treat_zero_as_nodata: true
+  
+  # v3 Environmental feature extraction (segment-based + seasonal)
+  v3:
+    topo:
+      max_seg_m: 20
+      smooth_window: 3
+      dem_nodata: -32768
+      min_valid_fraction: 0.2
+    canopy:
+      buffer_m: 25
+      ndvi_threshold: 0.2
+      ndvi_rescale: "auto"
+      treat_zero_as_nodata: true
+      min_coverage: 0.3
+  emit_v2_names: true
+  
+  # Sensor-edge mapping
+  mapping:
+    max_distance_m: 50.0  # Maximum sensor-to-edge distance
+    k_nearest: 5          # Number of edges for blending
+    blend_method: "idw"   # inverse distance weighting
+  
+  # Quality control thresholds
+  quality:
+    min_env_coverage: 0.2    # Minimum environmental feature coverage
+    max_snap_distance: 40.0  # Maximum sensor snap distance (meters)
+    min_sensors_per_city: 10 # Minimum sensors required for training
+
+# City-specific configurations
+cities:
+  melbourne:
+    display_name: "Melbourne"
+    country: "Australia"
+    timezone: "Australia/Melbourne"
+    
+    # Available years and default
+    available_years: [2019, 2020, 2021, 2022, 2023]
+    default_year: 2019  # Override global default
+    
+    # Data paths
+    paths:
+      network_gpkg: "data/osm/melbourne_street_network/melbourne_network.gpkg"
+      dem_raster: "data/external/melbourne/dem.tif"
+      ndvi_raster: "data/external/melbourne/green.tif"
+      sensors_csv: "data/raw/melbourne/sensors.csv"
+      output_dir: "data/processed/melbourne/csv"
+    
+    # City-specific parameter overrides
+    parameters:
+      canopy:
+        buffer_m: 20.0  # Smaller buffer for dense urban area
+        ndvi_threshold: 0.3  # Higher threshold for Australian vegetation
+      
+      mapping:
+        max_distance_m: 30.0  # Dense sensor network
+      
+      quality:
+        min_env_coverage: 0.15  # Lower threshold due to urban density
+    
+    # v3-specific overrides for Melbourne
+    v3:
+      canopy:
+        ndvi_threshold: 0.25
+        buffer_m: 25
+    
+    # Sensor data schema
+    sensor_schema:
+      id_column: "sensor_id"
+      name_column: "sensor_name" 
+      lat_column: "latitude"
+      lon_column: "longitude"
+      date_column: "date"
+      time_column: "time"
+      count_column: "hourly_counts"
+
+  new_york:
+    display_name: "New York City"
+    country: "USA"
+    timezone: "America/New_York"
+    
+    available_years: [2020, 2021, 2022, 2023]
+    default_year: 2023
+    
+    paths:
+      network_gpkg: "data/osm/newyork_street_network/newyork_network.gpkg"
+      dem_raster: "data/external/newyork/dem.tif"
+      ndvi_raster: "data/external/newyork/green.tif"
+      sensors_csv: "data/raw/newyork/sensors.csv"
+      output_dir: "data/processed/NewYork/csv"  # Note: capital N in existing structure
+    
+    parameters:
+      topography:
+        sample_every_m: 15.0  # Coarser sampling for large city
+      
+      canopy:
+        buffer_m: 30.0  # Larger buffer for wider streets
+        ndvi_threshold: 0.25  # Adjusted for temperate climate
+      
+      mapping:
+        max_distance_m: 60.0  # Larger blocks, more distance between sensors
+        k_nearest: 3
+    
+    # v3-specific overrides for New York
+    v3:
+      canopy:
+        ndvi_threshold: 0.2
+        buffer_m: 25
+    
+    sensor_schema:
+      id_column: "ID"
+      name_column: "Location"
+      lat_column: "Lat"
+      lon_column: "Lon" 
+      date_column: "Date"
+      time_column: "Hour"
+      count_column: "Count"
+
+  zurich:
+    display_name: "Zürich"
+    country: "Switzerland"
+    timezone: "Europe/Zurich"
+    
+    available_years: [2019, 2020, 2021, 2022, 2023]
+    default_year: 2023
+    
+    paths:
+      network_gpkg: "data/osm/zurich_street_network/zurich_network.gpkg"
+      dem_raster: "data/external/zurich/dem.tif"
+      ndvi_raster: "data/external/zurich/green.tif"
+      sensors_csv: "data/raw/zurich/sensors.csv"
+      output_dir: "data/processed/zurich/csv"
+    
+    parameters:
+      topography:
+        sample_every_m: 8.0   # Fine sampling for hilly terrain
+        min_valid_fraction: 0.3
+      
+      canopy:
+        buffer_m: 20.0        # Compact European city
+        ndvi_threshold: 0.15  # Lower threshold for alpine/temperate vegetation
+      
+      mapping:
+        max_distance_m: 25.0  # Very precise sensor placement
+    
+    # v3-specific overrides for Zurich (Alpine terrain requires precise processing)
+    v3:
+      topo:
+        max_seg_m: 15
+        smooth_window: 5
+      canopy:
+        ndvi_threshold: 0.3
+        buffer_m: 30
+    
+    sensor_schema:
+      id_column: "sensor_id"
+      name_column: "standort"  # German: location
+      lat_column: "lat"
+      lon_column: "lon"
+      date_column: "datum" 
+      time_column: "stunde"
+      count_column: "fussgaenger"  # German: pedestrians
+
+  dublin:
+    display_name: "Dublin"
+    country: "Ireland"
+    timezone: "Europe/Dublin"
+    
+    available_years: [2020, 2021, 2022, 2023]
+    default_year: 2023
+    
+    paths:
+      network_gpkg: "data/osm/dublin_street_network/dublin_network.gpkg"
+      dem_raster: "data/external/dublin/dem.tif"
+      ndvi_raster: "data/external/dublin/green.tif"
+      sensors_csv: "data/raw/dublin/sensors.csv"
+      output_dir: "data/processed/dublin/csv"
+    
+    parameters:
+      topography:
+        sample_every_m: 12.0
+        min_valid_fraction: 0.25  # Flatter terrain, more consistent coverage
+      
+      canopy:
+        buffer_m: 25.0
+        ndvi_threshold: 0.2   # Maritime climate, moderate vegetation
+      
+      mapping:
+        max_distance_m: 45.0
+    
+    sensor_schema:
+      id_column: "sensor_id"
+      name_column: "location_name"
+      lat_column: "latitude"
+      lon_column: "longitude"
+      date_column: "date"
+      time_column: "time"
+      count_column: "pedestrian_count"
+
+# Training configurations
+training:
+  # Cross-validation strategy
+  cv_strategy:
+    method: "leave_one_city_out"  # or "temporal_split" or "random_split"
+    test_size: 0.2
+    random_state: 42
+  
+  # Feature groups for ablation studies
+  feature_groups:
+    baseline:
+      - "hour"
+      - "day_of_week" 
+      - "month"
+      - "is_weekend"
+      - "highway"
+      - "latitude"
+      - "longitude"
+    
+    environmental:
+      - "mean_grade_pct"
+      - "max_grade_pct"
+      - "elev_start_m"
+      - "elev_end_m"
+      - "elev_range_m"
+      - "canopy_pct_buffer"
+    
+    network:
+      - "centrality"
+      - "connectivity"
+      - "betweenness"
+    
+    landuse:
+      - "residential"
+      - "commercial"
+      - "industrial"
+      - "recreational"
+  
+  # Model configurations
+  models:
+    catboost:
+      iterations: 1000
+      learning_rate: 0.1
+      depth: 6
+      l2_leaf_reg: 3
+      border_count: 128
+      random_seed: 42
+      loss_function: "RMSE"
+      eval_metric: "RMSE"
+      early_stopping_rounds: 100
+      use_best_model: true
+      
+      # Categorical features (will be auto-detected)
+      categorical_features:
+        - "highway"
+        - "day_of_week"
+        - "month"
+        - "city"  # for multi-city models
+
+# Inference configurations  
+inference:
+  # Prediction horizons
+  horizons:
+    realtime: "1 hour"
+    short_term: "1 day" 
+    medium_term: "1 week"
+    long_term: "1 month"
+  
+  # Output formats
+  output:
+    formats: ["csv", "geojson", "json"]
+    include_confidence: true
+    include_metadata: true
+  
+  # Fallback strategies
+  fallbacks:
+    missing_env_features: "median_impute"  # or "neighbor_interpolate" or "drop_features"
+    model_unavailable: "historical_average"
+    low_confidence: "flag_for_review"
+
+# Validation rules
+validation:
+  # Data quality checks
+  data_quality:
+    min_sensors_per_city: 10
+    min_observations_per_sensor: 100
+    max_missing_rate: 0.1
+    
+    coordinate_bounds:
+      melbourne: 
+        lat: [-38.5, -37.5]
+        lon: [144.5, 145.5]
+      new_york:
+        lat: [40.4, 41.0] 
+        lon: [-74.5, -73.5]
+      zurich:
+        lat: [47.2, 47.6]
+        lon: [8.3, 8.8]
+      dublin:
+        lat: [53.2, 53.5]
+        lon: [-6.5, -6.0]
+  
+  # Model performance thresholds
+  performance:
+    min_r2: 0.3
+    min_cohens_kappa: 0.3  # for classification
+    max_mape: 0.5
+    min_cross_city_r2: 0.2  # Lower threshold for cross-city generalization
+
+# Monitoring and alerting
+monitoring:
+  # Performance monitoring
+  performance_checks:
+    frequency: "daily"
+    metrics: ["rmse", "mae", "r2"]
+    alert_threshold: 0.1  # 10% degradation triggers alert
+  
+  # Data drift monitoring
+  drift_detection:
+    frequency: "weekly"
+    methods: ["kolmogorov_smirnov", "population_stability_index"]
+    alert_threshold: 0.05
+  
+  # System health checks
+  health_checks:
+    disk_space_threshold: 0.9  # 90% usage triggers alert
+    memory_threshold: 0.8      # 80% usage triggers alert
+    api_response_time: 5.0     # seconds
